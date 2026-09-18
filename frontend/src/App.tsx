@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity, ArrowRight, ArrowUpRight, Bell, BrainCircuit, CalendarDays, Check, CheckCircle2, ChevronDown,
   ChevronRight, ChevronUp, CircleHelp, Clock, Compass, Database, ExternalLink, FileSearch, Filter, GitBranch,
-  Globe2, Hexagon, Layers3, Menu, MoreHorizontal, Network, Plus, Search, Send, Settings2, ShieldAlert,
+  Globe2, Layers3, Menu, MoreHorizontal, Network, Plus, Search, Send, Settings2, ShieldAlert,
   ShieldCheck, Sparkles, Target, TriangleAlert, X, Zap, RefreshCw
 } from "lucide-react";
 import { Link, Route, Switch, useLocation, Router as WouterRouter } from "wouter";
@@ -176,14 +176,16 @@ function Sidebar({ open, close }: { open: boolean; close: () => void }) {
       </AnimatePresence>
       <aside className={cn("fixed inset-y-0 left-0 z-40 flex w-[256px] flex-col border-r border-white/[.08] bg-[#090e17]/95 px-4 py-5 backdrop-blur-xl transition-transform md:translate-x-0", open ? "translate-x-0" : "-translate-x-full")}>
         <div className="mb-9 flex items-center justify-between px-2">
-          <Link href="/" onClick={close} data-testid="link-brand" className="flex items-center gap-3">
-            <div className="relative grid h-9 w-9 place-items-center rounded-xl border border-[#56f2d5]/30 bg-[#56f2d5]/[.09] text-[#6fffe4]">
-              <Hexagon size={19} />
-              <span className="absolute h-1.5 w-1.5 rounded-full bg-[#6fffe4] shadow-[0_0_13px_#6fffe4]" />
+          <Link href="/" onClick={close} data-testid="link-brand" className="group flex items-center gap-3">
+            <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[#f4b5ca] bg-gradient-to-b from-[#fffafd] to-[#fef1f7] shadow-[0_2px_14px_rgba(244,181,202,0.45)] transition-all duration-300 group-hover:scale-105 group-hover:shadow-[0_4px_18px_rgba(244,181,202,0.65)]">
+              <div className="flex h-8 w-8 items-center justify-center overflow-visible">
+                <RabbitCharacter />
+              </div>
+              <span className="rabbit-spark rabbit-spark-one opacity-80" />
             </div>
             <div>
-              <div className="display text-[18px] font-semibold tracking-[-.04em] text-[#f0f5fa]">rabbet</div>
-              <div className="mono text-[9px] uppercase tracking-[.17em] text-[#738198]">clinical intelligence</div>
+              <div className="display text-[19px] font-bold tracking-[-.03em] text-[#f0f5fa] transition-colors group-hover:text-white">Rabbet</div>
+              <div className="mono text-[9px] uppercase tracking-[.18em] text-[#738198]">clinical intelligence</div>
             </div>
           </Link>
           <button onClick={close} className="text-[#718197] md:hidden" data-testid="button-close-navigation"><X size={18} /></button>
@@ -218,7 +220,6 @@ function Sidebar({ open, close }: { open: boolean; close: () => void }) {
           <div className="text-[11px] text-[#7f8ea3]">Study Sentinel / ATLAS</div>
           <div className="mt-2 text-[10px] text-[#5c6e83]">Protocol Version: <span className="mono text-[#8ffff0]">v{context?.protocol_version ?? 3}</span></div>
           <div className="mt-1 text-[10px] text-[#5c6e83]">Enrolled Subjects: <span className="mono text-[#d1dfed]">{context?.total_subjects ?? 241}</span></div>
-          <RabbitBuddy compact className="absolute -bottom-3 -right-2" />
         </div>
 
         <div className="mt-auto space-y-1">
