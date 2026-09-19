@@ -135,3 +135,5 @@ class ParsedQuestion(BaseModel):
     protocol_version: Optional[int] = None
     raw_text: str = ""
     clarification_needed: Optional[str] = None
+    interpretation_note: Optional[str] = None
+    category: Optional[str] = None

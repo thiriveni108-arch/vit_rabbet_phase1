@@ -12,6 +12,8 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
+import ReviewCenter from "@/pages/ReviewCenter";
+import WatchPage from "@/pages/WatchPage";
 import {
   api,
   type DashboardData,
@@ -38,6 +40,8 @@ type IconType = typeof Activity;
 
 const navItems = [
   { href: "/", label: "Command center", icon: Activity },
+  { href: "/review", label: "Review center", icon: GitBranch },
+  { href: "/watch", label: "Study watch", icon: ShieldCheck },
   { href: "/graph", label: "Study graph", icon: Network },
   { href: "/atlas", label: "Atlas agent", icon: BrainCircuit },
   { href: "/evidence", label: "Evidence explorer", icon: FileSearch },
@@ -3881,6 +3885,8 @@ function Router() {
       <motion.div key={path} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: .24, ease: "easeOut" }}>
         <Switch>
           <Route path="/" component={Dashboard} />
+          <Route path="/watch" component={WatchPage} />
+          <Route path="/review" component={ReviewCenter} />
           <Route path="/graph" component={StudyGraph} />
           <Route path="/atlas" component={Atlas} />
           <Route path="/evidence" component={Evidence} />

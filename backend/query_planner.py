@@ -100,6 +100,16 @@ class QueryPlanner:
             steps.append({"step": 2, "action": "FILTER_BY_SITE_IF_SPECIFIED", "site": q.site_id})
             steps.append({"step": 3, "action": "VERIFY_EXACT_FINDING_EVIDENCE"})
 
+        elif intent == "WHY_FLAGGED":
+            steps.append({"step": 1, "action": "RETRIEVE_SUBJECT_FINDINGS", "usubjid": q.usubjid})
+            steps.append({"step": 2, "action": "EXTRACT_FINDING_NARRATIVE_AND_QUANTITATIVE_LABS"})
+            steps.append({"step": 3, "action": "LINK_FINDING_EVIDENCE_RECORDS"})
+
+        elif intent == "EVIDENCE_REQUEST":
+            steps.append({"step": 1, "action": "RESOLVE_TARGET_FINDING_OR_RECORDS", "usubjid": q.usubjid, "criterion": q.criterion})
+            steps.append({"step": 2, "action": "VERIFY_PHYSICAL_GRAPH_RECORDS"})
+            steps.append({"step": 3, "action": "EMIT_FULL_PROVENANCE_AND_VALUES"})
+
         elif intent == "DOCUMENT_LOOKUP":
             steps.append({"step": 1, "action": "RETRIEVE_LOCAL_PROTOCOL_DOCUMENTS", "version": q.protocol_version})
             steps.append({"step": 2, "action": "MATCH_QUERY_AGAINST_SECTIONS"})

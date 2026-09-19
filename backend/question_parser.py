@@ -2,20 +2,20 @@
 
 Extracts subjects, sites, visits, lab/vital tests, domain keywords, field filters,
 numeric/ULN thresholds, temporal modifiers, aggregations, and query intents.
-Integrates dynamically with StudyMetadata to discover valid entities without hardcoding.
+Integrates dynamically with StudyMetadata and ConceptResolver to handle natural language variation.
 """
 
 import re
 from typing import Optional, List, Dict, Any, Tuple, Set
 from backend.schemas import Question, ParsedQuestion
 from backend.study_metadata import StudyMetadata
+from backend.concept_resolver import ConceptResolver, CanonicalConcept
 
 
 class QuestionParser:
     """Parses arbitrary clinical trial questions into structured query representations."""
 
     USUBJID_REGEX = re.compile(r"\b(042-S\d{2}-\d{3})\b", re.IGNORECASE)
-    SITE_REGEX = re.compile(r"\b(?:site\s+)?(S\d{2})\b", re.IGNORECASE)
     VISIT_REGEX = re.compile(
         r"\b(SCREENING|BASELINE|WEEK\s*\d+|W\d+|EOS|END OF STUDY|DAY\s*\d+)\b", re.IGNORECASE
     )
@@ -39,13 +39,13 @@ class QuestionParser:
     OPERATOR_MAP = {
         ">=": ">=", "at least": ">=", "greater than or equal": ">=",
         "<=": "<=", "at most": "<=", "less than or equal": "<=",
-        ">": ">", "above": ">", "greater than": ">", "more than": ">", "exceeding": ">", "over": ">", "higher than": ">",
+        ">": ">", "above": ">", "greater than": ">", "more than": ">", "exceeding": ">", "over": ">", "higher than": ">", "higher": ">",
         "<": "<", "below": "<", "less than": "<", "under": "<", "lower than": "<",
         "=": "==", "==": "==", "equal": "==", "equals": "=="
     }
 
     ULN_PATTERN = re.compile(
-        r"(>=|<=|>|<|=|above|greater than|more than|exceeding|over|higher than|below|less than|under|at least|at most)\s*"
+        r"(>=|<=|>|<|=|above|greater than|more than|exceeding|over|higher than|higher|below|less than|under|at least|at most)\s*"
         r"(\d+(?:\.\d+)?)\s*(?:x|\*|\-fold)?\s*(?:×)?\s*uln\b",
         re.IGNORECASE,
     )
@@ -54,7 +54,7 @@ class QuestionParser:
         re.IGNORECASE,
     )
     NUMERIC_CMP_PATTERN = re.compile(
-        r"(>=|<=|>|<|=|above|greater than|more than|exceeding|over|higher than|below|less than|under|at least|at most)\s*"
+        r"(>=|<=|>|<|=|above|greater than|more than|exceeding|over|higher than|higher|below|less than|under|at least|at most)\s*"
         r"(\d+(?:\.\d+)?)",
         re.IGNORECASE,
     )
@@ -81,7 +81,7 @@ class QuestionParser:
 
         # 0. Check for Unsupported / Out of Scope questions
         unsupported_patterns = [
-            "capital of", "weather in", "write a poem", "who won", "president of",
+            "capital of", "weather in", "write a poem", "who won",
             "what medication should this patient be prescribed", "should be prescribed",
             "will this patient recover", "best doctor", "who is the best doctor",
             "cure", "prognosis for"
@@ -103,7 +103,7 @@ class QuestionParser:
             "how many records in the study", "total records in the study",
             "study metadata", "study summary"
         ]
-        if any(p in lower for p in meta_patterns) and not cls.USUBJID_REGEX.search(text):
+        if any(p in lower for p in meta_patterns) and not ConceptResolver.extract_usubjid(text):
             return ParsedQuestion(
                 question_id=q_id,
                 intent="STUDY_METADATA",
@@ -129,23 +129,17 @@ class QuestionParser:
                 raw_text=text
             )
 
-        # 3. Extract USUBJID (supporting primary & secondary)
-        subjs: List[str] = [m.upper() for m in cls.USUBJID_REGEX.findall(text)]
-        usubjid: Optional[str] = subjs[0] if len(subjs) >= 1 else None
-        secondary_usubjid: Optional[str] = subjs[1] if len(subjs) >= 2 else None
+        # 3. Extract USUBJID (supporting full 042-S07-001 and shorthand S07-001)
+        usubjid = ConceptResolver.extract_usubjid(text)
+        secondary_usubjid = None
+        # Check for secondary USUBJID
+        all_subjs = cls.USUBJID_REGEX.findall(text)
+        if len(all_subjs) >= 2:
+            secondary_usubjid = all_subjs[1].upper()
 
-        # 4. Extract Site ID
-        site_id: Optional[str] = None
-        invalid_site: Optional[str] = None
-        site_matches = cls.SITE_REGEX.findall(text)
-        if site_matches:
-            site_id = site_matches[0].upper()
-        else:
-            num_match = re.search(r"\bsite\s+(\d{1,2})\b", text, re.IGNORECASE)
-            if num_match:
-                site_id = f"S{int(num_match.group(1)):02d}"
-
-        # Validate site against StudyMetadata if available
+        # 4. Extract Site ID (ensuring S07 is not parsed as site if part of S07-001)
+        site_id = ConceptResolver.extract_site_id(text)
+        invalid_site = None
         if site_id and metadata:
             if not metadata.validate_site(site_id):
                 invalid_site = site_id
@@ -208,14 +202,14 @@ class QuestionParser:
         aggregation: Optional[str] = None
         if any(w in lower for w in ("average", "mean", "avg")):
             aggregation = "AVG"
-        elif any(w in lower for w in ("maximum", "max", "highest", "peak", "largest")):
+        elif any(w in lower for w in ("maximum", "max", "highest", "peak", "largest", "most")):
             aggregation = "MAX"
         elif any(w in lower for w in ("minimum", "min", "lowest", "smallest")):
             aggregation = "MIN"
 
         # 9. Extract Group By
         group_by: Optional[str] = None
-        if "per site" in lower or "by site" in lower or "each site" in lower:
+        if "per site" in lower or "by site" in lower or "each site" in lower or "which site had the most" in lower or "site with the most" in lower or "site had the most" in lower:
             group_by = "site_id"
         elif "by arm" in lower or "per arm" in lower or "each arm" in lower:
             group_by = "arm"
@@ -308,18 +302,37 @@ class QuestionParser:
             filters.append({"field": "CMCLAS", "operator": "contains", "value": "GLUCOCORTICOID"})
             domain = "CM"
 
-        # 12. Determine Finding Criterion
+        # 12. Concept Resolution via ConceptResolver
+        canonical_concept, interpretation_note = ConceptResolver.resolve_concept(text)
         criterion: Optional[str] = None
-        if "hy" in lower or "liver safety" in lower:
+
+        if canonical_concept == CanonicalConcept.POTENTIAL_HYS_LAW:
             criterion = "potential_hys_law"
-        elif "serious adverse" in lower or "serious event" in lower or "sae" in lower or ("serious" in lower and "hospital" in lower):
+        elif canonical_concept == CanonicalConcept.HOSPITALIZED_NON_SERIOUS:
+            criterion = "hospitalized_non_serious"
+            domain = "AE"
+        elif canonical_concept == CanonicalConcept.SERIOUS_ADVERSE_EVENT:
             criterion = "serious_adverse_event"
-        elif "creatinine" in lower and ("exclusion" in lower or "renal" in lower or "kidney" in lower or "> 1.5" in lower or "greater than 1.5" in lower):
+            domain = "AE"
+        elif canonical_concept == CanonicalConcept.CREATININE_EXCLUSION:
             criterion = "creatinine_exclusion"
-        elif "prohibited" in lower or "concomitant medication" in lower or "forbidden med" in lower:
+        elif canonical_concept == CanonicalConcept.PROHIBITED_MEDICATION:
             criterion = "prohibited_medication"
-        elif "visit window" in lower or "visit deviation" in lower or "window deviation" in lower:
+        elif canonical_concept == CanonicalConcept.VISIT_WINDOW_DEVIATION:
             criterion = "visit_window_deviation"
+
+        # Fallback criterion keywords if not already set
+        if not criterion:
+            if "hy" in lower or "liver safety" in lower:
+                criterion = "potential_hys_law"
+            elif "serious adverse" in lower or "serious event" in lower or "sae" in lower or ("serious" in lower and "hospital" in lower):
+                criterion = "serious_adverse_event"
+            elif "creatinine" in lower and ("exclusion" in lower or "renal" in lower or "kidney" in lower or "> 1.5" in lower or "greater than 1.5" in lower):
+                criterion = "creatinine_exclusion"
+            elif "prohibited" in lower or "concomitant medication" in lower or "forbidden med" in lower:
+                criterion = "prohibited_medication"
+            elif "visit window" in lower or "visit deviation" in lower or "window deviation" in lower:
+                criterion = "visit_window_deviation"
 
         # 13. Determine Primary Intent
         clean_text = re.sub(r"[.?!]+$", "", lower).strip()
@@ -348,15 +361,19 @@ class QuestionParser:
             )
 
         # Primary intent rules
-        if group_by or any(w in lower for w in ("how many", "number of", "total participants", "count people", "count of", "count subjects", "count records", "count findings", "participant count")):
+        if canonical_concept == CanonicalConcept.WHY_FLAGGED or ("why" in lower and "flag" in lower):
+            intent = "WHY_FLAGGED"
+        elif canonical_concept == CanonicalConcept.EVIDENCE_REQUEST or any(w in lower for w in ("show the proof", "show proof", "show the evidence", "show exact evidence", "source records")):
+            intent = "EVIDENCE_REQUEST"
+        elif group_by or any(w in lower for w in ("how many", "number of", "total participants", "count people", "count of", "count subjects", "count records", "count findings", "participant count")):
             intent = "COUNT"
-        elif (any(w in lower for w in ("tell me about", "summarize", "patient 360", "overview of", "summary of", "profile of", "profile for", "patient profile", "subject profile")) or "profile" in lower) and usubjid:
+        elif (canonical_concept == CanonicalConcept.PATIENT_360 or any(w in lower for w in ("tell me about", "tell me everything about", "summarize", "patient 360", "overview of", "summary of", "profile of", "profile for", "patient profile", "subject profile")) or "profile" in lower) and usubjid:
             intent = "SUBJECT_360"
-        elif (any(w in lower for w in ("compare", "versus", "vs", "difference between")) or (visit and secondary_visit)) and usubjid:
+        elif (any(w in lower for w in ("compare", "versus", "vs", "difference between", "higher than baseline", "how much did", "increase")) or (visit and secondary_visit)) and usubjid:
             intent = "COMPARISON"
         elif temporal_mod == "TREND" or "trend" in lower or "progression" in lower or "over time" in lower:
             intent = "TREND"
-        elif aggregation:
+        elif aggregation and not group_by:
             intent = "AGGREGATE"
         elif criterion and not threshold_type:
             intent = "FINDING"
@@ -393,4 +410,5 @@ class QuestionParser:
             filters=filters,
             invalid_site=invalid_site,
             raw_text=text,
+            interpretation_note=interpretation_note,
         )

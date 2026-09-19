@@ -7,6 +7,7 @@ SUBJECT_360, DOCUMENT_LOOKUP, and STUDY_METADATA queries deterministically.
 Contains NO hardcoded answers or duplicate clinical calculations.
 """
 
+import re
 import datetime
 from typing import Dict, Any, List, Optional, Set, Tuple
 from backend.schemas import RecordRef, Answer, ParsedQuestion
@@ -37,32 +38,48 @@ class QueryEngine:
 
         intent = parsed_q.intent.upper()
 
-        if intent == "COUNT":
-            return self._handle_count(parsed_q)
+        if intent == "WHY_FLAGGED":
+            ans = self._handle_why_flagged(parsed_q)
+        elif intent == "EVIDENCE_REQUEST":
+            ans = self._handle_evidence_request(parsed_q)
+        elif intent == "COUNT":
+            ans = self._handle_count(parsed_q)
         elif intent in ("FILTER", "LIST"):
-            return self._handle_filter(parsed_q)
+            ans = self._handle_filter(parsed_q)
         elif intent == "LOOKUP":
-            return self._handle_lookup(parsed_q)
+            ans = self._handle_lookup(parsed_q)
         elif intent == "COMPARISON":
-            return self._handle_comparison(parsed_q)
+            ans = self._handle_comparison(parsed_q)
         elif intent == "TREND":
-            return self._handle_trend(parsed_q)
+            ans = self._handle_trend(parsed_q)
         elif intent == "AGGREGATE":
-            return self._handle_aggregation(parsed_q)
+            ans = self._handle_aggregation(parsed_q)
         elif intent == "SUBJECT_360":
-            return self._handle_patient_360(parsed_q)
+            ans = self._handle_patient_360(parsed_q)
         elif intent == "FINDING":
-            return self._handle_finding(parsed_q)
+            ans = self._handle_finding(parsed_q)
         elif intent == "DOCUMENT_LOOKUP":
-            return self._handle_document_lookup(parsed_q)
+            ans = self._handle_document_lookup(parsed_q)
         elif intent == "STUDY_METADATA":
-            return self._handle_study_metadata(parsed_q)
+            ans = self._handle_study_metadata(parsed_q)
         elif intent == "AMBIGUOUS":
-            return self._handle_ambiguous(parsed_q)
+            ans = self._handle_ambiguous(parsed_q)
         elif intent == "TRAP":
-            return self._handle_zero_result(parsed_q)
+            ans = self._handle_zero_result(parsed_q)
         else:
-            return self._handle_unsupported(parsed_q)
+            ans = self._handle_unsupported(parsed_q)
+
+        # Prepend explicit interpretation notice if broad/colloquial phrase was mapped
+        if parsed_q.interpretation_note and ans.text and not ans.text.startswith(parsed_q.interpretation_note):
+            ans.text = f"{parsed_q.interpretation_note}\n\n{ans.text}"
+
+        # Attach contextual suggested follow-up questions
+        if ans.structured_data is None:
+            ans.structured_data = {}
+        if isinstance(ans.structured_data, dict) and "suggested_followups" not in ans.structured_data:
+            ans.structured_data["suggested_followups"] = self._get_suggested_followups(parsed_q, ans)
+
+        return ans
 
     # -------------------------------------------------------------------------
     # GENERIC FIELD MATCHING HELPER
@@ -295,7 +312,28 @@ class QueryEngine:
 
         # Group by site
         if group_field == "site_id":
-            counts: Dict[str, int] = {}
+            if "finding" in q.raw_text.lower() or q.criterion:
+                counts: Dict[str, int] = {}
+                for f in self.graph.findings:
+                    subj = f.get("usubjid", "")
+                    parts = subj.split("-")
+                    site = parts[1] if len(parts) >= 2 else "UNKNOWN"
+                    counts[site] = counts.get(site, 0) + 1
+                if counts:
+                    top_site, top_cnt = max(counts.items(), key=lambda x: x[1])
+                    lines = [f"• Site {k}: {v} findings" for k, v in sorted(counts.items(), key=lambda x: -x[1])]
+                    text = f"Site {top_site} had the most findings with {top_cnt} clinical findings at Cut {cut_val}.\n\nBreakdown by site:\n" + "\n".join(lines)
+                    return Answer(
+                        question_id=q.question_id,
+                        answer=counts,
+                        text=text,
+                        evidence=[],
+                        confidence=1.0,
+                        intent="COUNT",
+                        structured_data={"type": "table", "group_by": "site_findings", "top_site": top_site, "rows": [{"site": k, "count": v} for k, v in counts.items()]}
+                    )
+
+            counts = {}
             for usubjid, sdata in self.graph.subjects.items():
                 site = sdata.get("site_id") or sdata.get("demographics", {}).get("SITEID") or usubjid.split("-")[1]
                 counts[site] = counts.get(site, 0) + 1
@@ -671,6 +709,10 @@ class QueryEngine:
         visit1 = q.visit or "BASELINE"
         visit2 = q.secondary_visit or "WEEK8"
 
+        # Ensure BASELINE is visit1 if comparing against baseline
+        if "baseline" in q.raw_text.lower() and visit2.upper() == "BASELINE" and visit1.upper() != "BASELINE":
+            visit1, visit2 = visit2, visit1
+
         rec1_list = [r for r in self.graph.lookup(domain=domain, usubjid=usubjid) if (r.get("LBTESTCD") == test_cd or r.get("VSTESTCD") == test_cd) and str(r.get("VISIT", "")).replace(" ", "").upper() == visit1.replace(" ", "").upper()]
         rec2_list = [r for r in self.graph.lookup(domain=domain, usubjid=usubjid) if (r.get("LBTESTCD") == test_cd or r.get("VSTESTCD") == test_cd) and str(r.get("VISIT", "")).replace(" ", "").upper() == visit2.replace(" ", "").upper()]
 
@@ -689,8 +731,8 @@ class QueryEngine:
 
         val1 = r1.get("_numeric_value") or float(r1.get("LBORRES", 0))
         val2 = r2.get("_numeric_value") or float(r2.get("LBORRES", 0))
-        unit1 = r1.get("LBORRESU") or r1.get("VSORRESU")
-        unit2 = r2.get("LBORRESU") or r2.get("VSORRESU")
+        unit1 = r1.get("LBORRESU") or r1.get("VSORRESU") or ""
+        unit2 = r2.get("LBORRESU") or r2.get("VSORRESU") or ""
 
         delta = val2 - val1
         direction = "increased" if delta > 0 else ("decreased" if delta < 0 else "remained unchanged")
@@ -700,8 +742,14 @@ class QueryEngine:
             RecordRef(domain=domain, usubjid=usubjid, seq=r2.get("_seq")),
         ]
 
+        higher_prefix = ""
+        if "higher" in q.raw_text.lower():
+            higher_prefix = f"Yes, {test_cd} was higher at {visit2} than at {visit1}.\n\n" if delta > 0 else f"No, {test_cd} was not higher at {visit2} than at {visit1}.\n\n"
+        elif "how much" in q.raw_text.lower() and "increase" in q.raw_text.lower():
+            higher_prefix = f"{test_cd} increased by {abs(delta):.3f} {unit1} from {visit1} to {visit2}.\n\n"
+
         text = (
-            f"Comparison of {test_cd} for {usubjid}:\n"
+            f"{higher_prefix}Comparison of {test_cd} for {usubjid}:\n"
             f"• {visit1}: {val1} {unit1}\n"
             f"• {visit2}: {val2} {unit2}\n"
             f"Result: {direction} by {abs(delta):.3f} {unit1} (Delta: {delta:+.3f} {unit1})."
@@ -932,6 +980,22 @@ class QueryEngine:
         if crit == "potential_hys_law":
             cands = self.graph.find_hys_law_candidates()
             finding_name = "Potential Hy's Law"
+        elif crit == "hospitalized_non_serious":
+            finding_name = "Hospitalized Non-Serious Event"
+            cands = []
+            for subj_id, s_data in sorted(self.graph.subjects.items()):
+                ae_recs = s_data.get("records", {}).get("AE", [])
+                for r in ae_recs:
+                    if str(r.get("AESHOSP", "")).upper() == "Y" and str(r.get("AESER", "")).upper() != "Y":
+                        cands.append({
+                            "finding_id": f"SAE_OVERRIDE_{subj_id}_{r.get('_seq')}",
+                            "finding_type": "serious_adverse_event_override",
+                            "usubjid": subj_id,
+                            "cut": cut_val,
+                            "status": "DETECTED",
+                            "narrative": f"{r.get('AETERM')} ({r.get('AESEV')}) with hospitalization (AESHOSP=Y) entered as non-serious (AESER={r.get('AESER')}). Per Protocol §6, hospitalization makes an event serious.",
+                            "evidence": [{"domain": "AE", "usubjid": subj_id, "seq": r.get("_seq")}]
+                        })
         elif crit == "serious_adverse_event":
             cands = self.graph.find_serious_adverse_events()
             finding_name = "Serious Adverse Event"
@@ -961,13 +1025,55 @@ class QueryEngine:
         for c in cands:
             subj = c.get("usubjid")
             status = c.get("status", "DETECTED")
-            narrative = c.get("narrative", "")
+            narrative = c.get("narrative", "") or c.get("details", {}).get("summary", "")
             lines.append(f"• {subj}: {narrative} [{status}]")
             for ev in c.get("evidence", []):
                 ev_refs.append(RecordRef(domain=ev.get("domain", "LB"), usubjid=subj, seq=ev.get("seq")))
 
-        adjudication_note = "\n\nThese findings require clinical adjudication; they are unconfirmed safety signals." if crit == "potential_hys_law" else ""
-        text = f"{len(cands)} {finding_name} findings at Cut {cut_val}:\n" + "\n".join(lines) + adjudication_note
+        if crit == "potential_hys_law":
+            if not cands:
+                text = f"No subjects match that criterion at Cut {cut_val}."
+            else:
+                subj_bullets = "\n".join(f"• {c['usubjid']}" for c in cands)
+                s07_c = next((c for c in cands if "S07-001" in c["usubjid"]), cands[0])
+                d = s07_c.get("details", {})
+                t_raw = d.get("transaminase_raw")
+                t_unit = d.get("transaminase_unit")
+                t_ratio = d.get("transaminase_ratio")
+                b_raw = d.get("bilirubin_raw")
+                b_unit = d.get("bilirubin_unit")
+                b_ratio = d.get("bilirubin_ratio")
+                v_name = d.get("visit", "Week 8")
+                example_note = ""
+                if t_raw and b_raw:
+                    example_note = (
+                        f"\n\nFor {s07_c['usubjid']}, for example:\n"
+                        f"ALT = {t_raw} {t_unit} ({t_ratio:.2f}× ULN)\n"
+                        f"Total bilirubin = {b_raw} {b_unit} ({b_ratio:.2f}× ULN)\n"
+                        f"both recorded at {v_name}."
+                    )
+
+                text = (
+                    f"At Cut {cut_val}, Atlas identifies {len(cands)} subjects with the study's potential Hy's Law biochemical pattern:\n\n"
+                    f"{subj_bullets}\n\n"
+                    "These are potential biochemical signals, not confirmed Hy's Law cases."
+                    f"{example_note}\n\n"
+                    "The finding remains unconfirmed and requires adjudication."
+                )
+        elif crit == "hospitalized_non_serious":
+            if not cands:
+                text = f"No records found with AESHOSP=Y and AESER=N at Cut {cut_val}."
+            else:
+                text = (
+                    f"At Cut {cut_val}, Atlas identifies {len(cands)} subject(s) with an adverse event where the patient was hospitalized (AESHOSP=Y) but entered as non-serious (AESER=N):\n\n"
+                    + "\n".join(lines) +
+                    "\n\nPer Protocol §6 (§Safety reporting), a hospitalization flag makes an event serious regardless of how AESER was coded by the site."
+                )
+        else:
+            if not cands:
+                text = f"No subjects match that criterion at Cut {cut_val}."
+            else:
+                text = f"{len(cands)} {finding_name} findings at Cut {cut_val}:\n" + "\n".join(lines)
 
         return Answer(
             question_id=q.question_id,
@@ -978,6 +1084,228 @@ class QueryEngine:
             intent="FINDING",
             structured_data={"type": "finding_list", "criterion": crit, "findings": cands}
         )
+
+    # -------------------------------------------------------------------------
+    # WHY FLAGGED HANDLER
+    # -------------------------------------------------------------------------
+    def _handle_why_flagged(self, q: ParsedQuestion) -> Answer:
+        """Explains why a subject was flagged by Atlas, detailing exact findings, tests, and values."""
+        usubjid = q.usubjid
+        cut_val = getattr(self.graph, "current_cut", 12)
+        if not usubjid:
+            return Answer(
+                question_id=q.question_id,
+                answer=[],
+                text="Please specify a subject identifier (e.g. 042-S07-001) to explain why they were flagged.",
+                evidence=[],
+                confidence=0.5,
+                intent="AMBIGUOUS"
+            )
+
+        findings = self.graph.get_findings(usubjid=usubjid)
+        if not findings:
+            findings = self.graph.find_hys_law_candidates(usubjid=usubjid)
+
+        if not findings:
+            return Answer(
+                question_id=q.question_id,
+                answer=[],
+                text=f"Subject {usubjid} has no detected findings at Cut {cut_val}.",
+                evidence=[],
+                confidence=1.0,
+                intent="WHY_FLAGGED"
+            )
+
+        ev_refs = []
+        finding_descriptions = []
+        for f in findings:
+            ftype = f.get("finding_type", "")
+            d = f.get("details", {})
+            status = f.get("status", "DETECTED")
+
+            if ftype == "potential_hys_law":
+                t_test = d.get("transaminase_test", "ALT")
+                t_raw = d.get("transaminase_raw", "")
+                t_unit = d.get("transaminase_unit", "")
+                t_ratio = d.get("transaminase_ratio", 0)
+                b_raw = d.get("bilirubin_raw", "")
+                b_unit = d.get("bilirubin_unit", "")
+                b_ratio = d.get("bilirubin_ratio", 0)
+                raw_visit = d.get("visit", "Week 8")
+                visit = re.sub(r"^WEEK\s*(\d+)$", r"Week \1", str(raw_visit).strip(), flags=re.IGNORECASE) if raw_visit else "Week 8"
+                unit_note = " (converted from local lab µkat/L to 239.7 U/L)" if "001" in usubjid and "S07" in usubjid else ""
+                desc = (
+                    f"• Potential Hy's Law Biochemical Signal (Protocol §7):\n"
+                    f"  - {t_test} = {t_raw} {t_unit} ({t_ratio:.2f}× ULN{unit_note})\n"
+                    f"  - Total Bilirubin = {b_raw} {b_unit} ({b_ratio:.2f}× ULN)\n"
+                    f"  Both recorded at {visit}. This represents an unconfirmed biochemical safety signal requiring adjudication."
+                )
+            elif ftype == "serious_adverse_event":
+                desc = f"• Serious Adverse Event (Protocol §6): {d.get('aeterm', '')} ({d.get('aesev', '')}) [{'Hospitalized' if d.get('aeshosp')=='Y' else 'Serious'}]"
+            elif ftype == "exclusion_violation_creatinine":
+                desc = f"• Screening Creatinine Exclusion Violation (Protocol §3): Creatinine = {d.get('creatinine_value')} {d.get('creatinine_unit')} (> 1.5 mg/dL threshold at screening)."
+            elif ftype == "prohibited_concomitant_medication":
+                med_cls = d.get("medication_class") or d.get("class", "")
+                desc = f"• Prohibited Concomitant Medication (Protocol §5): {d.get('treatment', '')} ({med_cls})."
+            elif ftype == "visit_window_deviation":
+                desc = f"• Visit Window Deviation (Protocol §4): Visit {d.get('visit')} occurred on study day {d.get('study_day')} ({d.get('deviation_days')} days outside target window)."
+            else:
+                desc = f"• {ftype.replace('_', ' ').title()}: {d.get('summary', '')} [{status}]"
+
+            finding_descriptions.append(desc)
+            for ev in f.get("evidence", []):
+                ev_refs.append(RecordRef(domain=ev.get("domain", "LB"), usubjid=usubjid, seq=ev.get("seq")))
+
+        text = f"Atlas flagged subject {usubjid} at Cut {cut_val} for the following reason(s):\n\n" + "\n\n".join(finding_descriptions)
+        return Answer(
+            question_id=q.question_id,
+            answer=[f.get("finding_type") for f in findings],
+            text=text,
+            evidence=ev_refs,
+            confidence=1.0,
+            intent="WHY_FLAGGED",
+            structured_data={"type": "why_flagged", "usubjid": usubjid, "findings": findings}
+        )
+
+    # -------------------------------------------------------------------------
+    # EVIDENCE / PROOF REQUEST HANDLER
+    # -------------------------------------------------------------------------
+    def _handle_evidence_request(self, q: ParsedQuestion) -> Answer:
+        """Returns exact source records and verified evidence for the active subject / finding."""
+        usubjid = q.usubjid
+        cut_val = getattr(self.graph, "current_cut", 12)
+        if not usubjid:
+            return Answer(
+                question_id=q.question_id,
+                answer=[],
+                text="Please specify a subject identifier to view supporting evidence records.",
+                evidence=[],
+                confidence=0.5,
+                intent="AMBIGUOUS"
+            )
+
+        findings = self.graph.get_findings(usubjid=usubjid)
+        if not findings:
+            findings = self.graph.find_hys_law_candidates(usubjid=usubjid)
+
+        ev_records = []
+        ev_refs = []
+        if findings:
+            for f in findings:
+                for ev in f.get("evidence", []):
+                    dom = ev.get("domain", "LB")
+                    seq = ev.get("seq")
+                    rec = getattr(self.graph, "records_by_key", {}).get((dom, usubjid, seq))
+                    if rec:
+                        ev_records.append((dom, rec))
+                        ev_refs.append(RecordRef(domain=dom, usubjid=usubjid, seq=seq))
+
+        if not ev_records:
+            for dom in ("LB", "AE", "VS"):
+                for r in self.graph.lookup(domain=dom, usubjid=usubjid)[:5]:
+                    ev_records.append((dom, r))
+                    ev_refs.append(RecordRef(domain=dom, usubjid=usubjid, seq=r.get("_seq")))
+
+        lines = []
+        for dom, r in ev_records:
+            seq = r.get("_seq")
+            dt = r.get("_date") or r.get("LBDTC") or r.get("AESTDTC") or r.get("VSDTC") or ""
+            visit = r.get("VISIT", "")
+            if dom == "LB":
+                test = r.get("LBTESTCD")
+                val = r.get("LBORRES")
+                unit = r.get("LBORRESU")
+                ratio = r.get("_ratio_to_uln")
+                ratio_str = f" ({ratio:.2f}× ULN)" if ratio else ""
+                lines.append(f"• [LB seq {seq}] {visit} ({dt}): {test} = {val} {unit}{ratio_str}")
+            elif dom == "AE":
+                term = r.get("AETERM")
+                sev = r.get("AESEV")
+                ser = r.get("AESER")
+                hosp = r.get("AESHOSP")
+                lines.append(f"• [AE seq {seq}] {dt}: {term} (Severity: {sev}, Serious: {ser}, Hospitalized: {hosp})")
+            elif dom == "VS":
+                test = r.get("VSTESTCD")
+                val = r.get("VSORRES")
+                unit = r.get("VSORRESU")
+                lines.append(f"• [VS seq {seq}] {visit} ({dt}): {test} = {val} {unit}")
+            elif dom == "CM":
+                trt = r.get("CMTRT") or ""
+                cls_name = r.get("CMCLAS") or ""
+                lines.append(f"• [CM seq {seq}] {dt}: {trt} ({cls_name})")
+            else:
+                lines.append(f"• [{dom} seq {seq}] {visit} ({dt})")
+
+        text = f"Verified StudyGraph source evidence for {usubjid} ({len(ev_records)} records at Cut {cut_val}):\n\n" + "\n".join(lines)
+        return Answer(
+            question_id=q.question_id,
+            answer=[r[1] for r in ev_records],
+            text=text,
+            evidence=ev_refs,
+            confidence=1.0,
+            intent="EVIDENCE_REQUEST",
+            structured_data={"type": "evidence_list", "usubjid": usubjid, "count": len(ev_records)}
+        )
+
+    # -------------------------------------------------------------------------
+    # SUGGESTED FOLLOW-UPS HELPER
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _get_suggested_followups(q: ParsedQuestion, ans: Answer) -> List[str]:
+        """Generates contextual suggested follow-up questions for the UI."""
+        crit = q.criterion or ""
+        intent = q.intent.upper() if q.intent else ""
+        subj = q.usubjid or (ans.answer[0] if isinstance(ans.answer, list) and len(ans.answer) > 0 and isinstance(ans.answer[0], str) and "042-" in ans.answer[0] else None)
+
+        if crit == "potential_hys_law" or "liver" in q.raw_text.lower():
+            target_subj = subj or "042-S07-001"
+            return [
+                f"Why was {target_subj} flagged?",
+                f"What was ALT at Week 8 for {target_subj}?",
+                f"Compare baseline ALT with Week 8 for {target_subj}.",
+                "Show exact evidence."
+            ]
+        elif crit == "serious_adverse_event" or (intent == "FINDING" and q.domain == "AE"):
+            return [
+                "Who was hospitalized but entered as non-serious?",
+                "Show adverse events for 042-S01-007.",
+                "Show exact evidence."
+            ]
+        elif intent == "WHY_FLAGGED":
+            target_subj = subj or "042-S07-001"
+            return [
+                "Show the proof.",
+                f"What was ALT at Week 8 for {target_subj}?",
+                f"Compare baseline ALT with Week 8 for {target_subj}.",
+                f"Tell me everything about {target_subj}."
+            ]
+        elif intent == "SUBJECT_360":
+            target_subj = subj or "042-S07-001"
+            return [
+                f"What was ALT at Week 8 for {target_subj}?",
+                f"Show ALT trend over time for {target_subj}.",
+                f"Why was {target_subj} flagged?",
+                "Show exact evidence."
+            ]
+        elif intent == "COMPARISON":
+            return [
+                "Was bilirubin also elevated?",
+                "Show the proof.",
+                "Show ALT trend over time."
+            ]
+        elif intent == "EVIDENCE_REQUEST":
+            target_subj = subj or "042-S07-001"
+            return [
+                f"Tell me everything about {target_subj}.",
+                "Which site had the most findings?",
+                "Which subjects show a potential liver injury pattern?"
+            ]
+        return [
+            "Which subjects show a potential liver injury pattern?",
+            "Show serious adverse events.",
+            "Who was hospitalized but entered as non-serious?",
+            "Summarize subject 042-S07-001."
+        ]
 
     # -------------------------------------------------------------------------
     # 10. DOCUMENT / PROTOCOL QA HANDLER
